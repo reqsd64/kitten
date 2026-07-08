@@ -7,9 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
-static int skip_dot(const struct dirent *entry)
+#define DEFAULT_PREVIEW_LIMIT ((size_t)256 * 1024)
+
+static size_t content_preview_limit = DEFAULT_PREVIEW_LIMIT;
+
+static int show_dirent(const struct dirent *entry)
 {
 	return strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0;
 }
@@ -32,63 +37,7 @@ static char *join_path(const char *left, const char *right)
 	return path;
 }
 
-static const char *base_name(const char *path)
-{
-	const char *slash = strrchr(path, '/');
-
-	return slash ? slash + 1 : path;
-}
-
-static char *extend_prefix(const char *prefix, int is_last)
-{
-	static const char *tail_last = "    ";
-	static const char *tail_mid = "│   ";
-	const char *tail = is_last ? tail_last : tail_mid;
-	size_t prefix_len = strlen(prefix);
-	char *next = malloc(prefix_len + 5);
-
-	if (!next)
-		return NULL;
-
-	memcpy(next, prefix, prefix_len);
-	memcpy(next + prefix_len, tail, 4);
-	next[prefix_len + 4] = '\0';
-	return next;
-}
-
-static char *read_symlink_target(const char *path)
-{
-	size_t cap = 128;
-	char *target = malloc(cap);
-
-	if (!target)
-		return NULL;
-
-	for (;;) {
-		ssize_t len = readlink(path, target, cap - 1);
-		char *grown;
-
-		if (len < 0) {
-			free(target);
-			return NULL;
-		}
-
-		if ((size_t)len < cap - 1) {
-			target[len] = '\0';
-			return target;
-		}
-
-		cap *= 2;
-		grown = realloc(target, cap);
-		if (!grown) {
-			free(target);
-			return NULL;
-		}
-		target = grown;
-	}
-}
-
-static int file_looks_binary(FILE *fp)
+static int has_nul_byte(FILE *fp)
 {
 	unsigned char buf[4096];
 	size_t nread;
@@ -111,198 +60,336 @@ static int file_looks_binary(FILE *fp)
 	return 0;
 }
 
-static void print_file_contents(const char *path, const char *content_prefix)
+static int print_file_preview(const char *path, const char *prefix, off_t size)
 {
-	FILE *fp = fopen(path, "rb");
+	FILE *fp;
 	char *line = NULL;
 	size_t cap = 0;
+	size_t bytes_read = 0;
+	size_t line_bytes;
 	ssize_t nread;
 	int saw_content = 0;
+	int had_error = 0;
 
-	printf("%s┌── contents\n", content_prefix);
-	if (!fp) {
-		printf("%s│ [cannot open: %s]\n", content_prefix, strerror(errno));
-		printf("%s└──\n", content_prefix);
-		return;
+	printf("%s┌── contents\n", prefix);
+
+	if (size > (off_t)content_preview_limit) {
+		printf("%s│ [skipped: %lld bytes exceeds %zu byte limit]\n",
+		    prefix, (long long)size, content_preview_limit);
+		printf("%s└──\n", prefix);
+		return 0;
 	}
 
-	if (file_looks_binary(fp)) {
-		printf("%s│ [binary file]\n", content_prefix);
+	fp = fopen(path, "rb");
+	if (!fp) {
+		printf("%s│ [cannot open: %s]\n", prefix, strerror(errno));
+		printf("%s└──\n", prefix);
+		return 1;
+	}
+
+	if (has_nul_byte(fp)) {
+		printf("%s│ [binary file]\n", prefix);
 		fclose(fp);
-		printf("%s└──\n", content_prefix);
-		return;
+		printf("%s└──\n", prefix);
+		return 0;
 	}
 
 	while ((nread = getline(&line, &cap, fp)) != -1) {
+		line_bytes = (size_t)nread;
+		if (line_bytes > content_preview_limit - bytes_read) {
+			printf("%s│ [truncated after %zu bytes]\n", prefix, content_preview_limit);
+			saw_content = 1;
+			break;
+		}
+		bytes_read += line_bytes;
 		while (nread > 0 && (line[nread - 1] == '\n' || line[nread - 1] == '\r'))
 			line[--nread] = '\0';
 		if (nread == 0)
-			printf("%s│\n", content_prefix);
+			printf("%s│\n", prefix);
 		else
-			printf("%s│ %s\n", content_prefix, line);
+			printf("%s│ %s\n", prefix, line);
 		saw_content = 1;
 	}
 
-	if (ferror(fp))
-		printf("%s│ [read error]\n", content_prefix);
-	else if (!saw_content)
-		printf("%s│ [empty file]\n", content_prefix);
+	if (ferror(fp)) {
+		printf("%s│ [read error]\n", prefix);
+		had_error = 1;
+	} else if (!saw_content) {
+		printf("%s│ [empty file]\n", prefix);
+	}
 
 	free(line);
 	fclose(fp);
-	printf("%s└──\n", content_prefix);
+	printf("%s└──\n", prefix);
+	return had_error;
 }
 
-static void walk_path(const char *path, const char *prefix, int is_last, int is_root);
+static int print_entry(const char *path, const char *prefix, int is_last, int is_root);
 
-static void walk_dir(const char *path, const char *prefix)
+static int set_preview_limit(const char *text)
+{
+	char *end;
+	unsigned long long value;
+	unsigned long long scale = 1;
+	unsigned long long total;
+
+	if (!text[0] || text[0] == '-')
+		return -1;
+
+	errno = 0;
+	value = strtoull(text, &end, 10);
+	if (errno == ERANGE || end == text)
+		return -1;
+
+	if (*end) {
+		if (end[1])
+			return -1;
+		if (*end == 'k' || *end == 'K')
+			scale = 1024;
+		else if (*end == 'm' || *end == 'M')
+			scale = 1024 * 1024;
+		else if (*end == 'g' || *end == 'G')
+			scale = 1024 * 1024 * 1024ULL;
+		else
+			return -1;
+	}
+
+	if (value > ULLONG_MAX / scale)
+		return -1;
+	total = value * scale;
+	if (total > (unsigned long long)(size_t)-1)
+		return -1;
+
+	content_preview_limit = (size_t)total;
+	return 0;
+}
+
+static int print_directory(const char *path, const char *prefix)
 {
 	struct dirent **entries = NULL;
-	int count = scandir(path, &entries, skip_dot, alphasort);
+	int count = scandir(path, &entries, show_dirent, alphasort);
 	int i;
+	int had_error = 0;
 
 	if (count < 0) {
 		printf("%s└── [cannot read directory: %s]\n", prefix, strerror(errno));
-		return;
+		return 1;
 	}
 
 	if (count == 0) {
 		printf("%s└── [empty directory]\n", prefix);
 		free(entries);
-		return;
+		return 0;
 	}
 
 	for (i = 0; i < count; ++i) {
 		char *child_path = join_path(path, entries[i]->d_name);
 
 		if (!child_path) {
-			printf("%s└── [out of memory]\n", prefix);
+			printf("%s%s %s [out of memory]\n",
+			    prefix, i == count - 1 ? "└──" : "├──", entries[i]->d_name);
+			had_error = 1;
 			free(entries[i]);
 			continue;
 		}
 
-		walk_path(child_path, prefix, i == count - 1, 0);
+		if (print_entry(child_path, prefix, i == count - 1, 0) != 0)
+			had_error = 1;
 		free(child_path);
 		free(entries[i]);
 	}
 
 	free(entries);
+	return had_error;
 }
 
-static void walk_path(const char *path, const char *prefix, int is_last, int is_root)
+static int print_entry(const char *path, const char *prefix, int is_last, int is_root)
 {
 	struct stat st;
-	const char *name = is_root ? path : base_name(path);
+	const char *slash = strrchr(path, '/');
+	const char *name = is_root || !slash ? path : slash + 1;
 	const char *branch = is_last ? "└──" : "├──";
-	char *child_prefix;
+	char *next_prefix;
+	const char *tail;
+	size_t prefix_len;
 
 	if (lstat(path, &st) != 0) {
 		if (is_root)
 			printf("%s [not found: %s]\n", path, strerror(errno));
 		else
 			printf("%s%s %s [not found: %s]\n", prefix, branch, name, strerror(errno));
-		return;
+		return 1;
 	}
 
 	if (S_ISLNK(st.st_mode)) {
-		char *target = read_symlink_target(path);
+		char target[4096];
+		ssize_t len = readlink(path, target, sizeof(target) - 1);
+		int saved_errno = errno;
+
+		if (len >= 0)
+			target[len] = '\0';
 
 		if (is_root)
-			printf("%s [symlink -> %s]\n", path, target ? target : strerror(errno));
+			printf("%s [symlink -> %s]\n", path, len >= 0 ? target : strerror(saved_errno));
 		else
-			printf("%s%s %s -> %s [symlink]\n", prefix, branch, name, target ? target : strerror(errno));
+			printf("%s%s %s -> %s [symlink]\n", prefix, branch, name,
+			    len >= 0 ? target : strerror(saved_errno));
 
-		free(target);
-		return;
+		return len < 0;
 	}
 
 	if (is_root) {
 		if (S_ISDIR(st.st_mode)) {
 			printf("%s/\n", path);
-			child_prefix = strdup("");
-			if (!child_prefix)
-				return;
-			walk_dir(path, child_prefix);
-			free(child_prefix);
-			return;
+			next_prefix = strdup("");
+			if (!next_prefix) {
+				printf("└── [out of memory]\n");
+				return 1;
+			}
+			if (print_directory(path, next_prefix) != 0) {
+				free(next_prefix);
+				return 1;
+			}
+			free(next_prefix);
+			return 0;
 		}
 
 		if (S_ISREG(st.st_mode)) {
 			printf("%s [file, %lld bytes]\n", path, (long long)st.st_size);
-			child_prefix = strdup("    ");
-			if (!child_prefix)
-				return;
-			print_file_contents(path, child_prefix);
-			free(child_prefix);
-			return;
+			next_prefix = strdup("    ");
+			if (!next_prefix) {
+				printf("    [out of memory]\n");
+				return 1;
+			}
+			if (print_file_preview(path, next_prefix, st.st_size) != 0) {
+				free(next_prefix);
+				return 1;
+			}
+			free(next_prefix);
+			return 0;
 		}
 
 		printf("%s [special file, %lld bytes]\n", path, (long long)st.st_size);
-		return;
+		return 0;
 	}
 
 	if (S_ISDIR(st.st_mode)) {
 		printf("%s%s %s/\n", prefix, branch, name);
-		child_prefix = extend_prefix(prefix, is_last);
-		if (!child_prefix)
-			return;
-		walk_dir(path, child_prefix);
-		free(child_prefix);
-		return;
+		tail = is_last ? "    " : "│   ";
+		prefix_len = strlen(prefix);
+		next_prefix = malloc(prefix_len + 5);
+		if (!next_prefix) {
+			printf("%s%s [out of memory]\n", prefix, is_last ? "    " : "│   ");
+			return 1;
+		}
+		memcpy(next_prefix, prefix, prefix_len);
+		memcpy(next_prefix + prefix_len, tail, 4);
+		next_prefix[prefix_len + 4] = '\0';
+		if (print_directory(path, next_prefix) != 0) {
+			free(next_prefix);
+			return 1;
+		}
+		free(next_prefix);
+		return 0;
 	}
 
 	if (S_ISREG(st.st_mode)) {
 		printf("%s%s %s [file, %lld bytes]\n", prefix, branch, name, (long long)st.st_size);
-		child_prefix = extend_prefix(prefix, is_last);
-		if (!child_prefix)
-			return;
-		print_file_contents(path, child_prefix);
-		free(child_prefix);
-		return;
+		tail = is_last ? "    " : "│   ";
+		prefix_len = strlen(prefix);
+		next_prefix = malloc(prefix_len + 5);
+		if (!next_prefix) {
+			printf("%s%s [out of memory]\n", prefix, is_last ? "    " : "│   ");
+			return 1;
+		}
+		memcpy(next_prefix, prefix, prefix_len);
+		memcpy(next_prefix + prefix_len, tail, 4);
+		next_prefix[prefix_len + 4] = '\0';
+		if (print_file_preview(path, next_prefix, st.st_size) != 0) {
+			free(next_prefix);
+			return 1;
+		}
+		free(next_prefix);
+		return 0;
 	}
 
 	printf("%s%s %s [special file, %lld bytes]\n", prefix, branch, name, (long long)st.st_size);
+	return 0;
 }
 
 static void print_usage(const char *argv0)
 {
-	printf("Usage: %s [PATH ...]\n", argv0);
+	printf("Usage: %s [-m BYTES] [PATH ...]\n", argv0);
 	printf("\n");
 	printf("Print a tree view of the given paths and show text file contents inline.\n");
 	printf("When no path is provided, kitten inspects the current directory.\n");
 	printf("A single directory argument is opened in place before the tree is shown.\n");
+	printf("Use -m or --max-bytes to change the per-file content preview limit.\n");
 }
 
 int main(int argc, char **argv)
 {
 	int i;
+	int first_path = 1;
 	struct stat st;
+	int had_error = 0;
 
-	if (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
-		print_usage(argv[0]);
-		return 0;
-	}
+	while (first_path < argc) {
+		if (strcmp(argv[first_path], "--") == 0) {
+			++first_path;
+			break;
+		}
 
-	if (argc == 1) {
-		walk_path(".", "", 1, 1);
-		return 0;
-	}
+		if (strcmp(argv[first_path], "-h") == 0 || strcmp(argv[first_path], "--help") == 0) {
+			print_usage(argv[0]);
+			return 0;
+		}
 
-	if (argc == 2 && stat(argv[1], &st) == 0 && S_ISDIR(st.st_mode)) {
-		if (chdir(argv[1]) != 0) {
-			fprintf(stderr, "kitten: %s: %s\n", argv[1], strerror(errno));
+		if (strcmp(argv[first_path], "-m") == 0 || strcmp(argv[first_path], "--max-bytes") == 0) {
+			if (++first_path == argc || set_preview_limit(argv[first_path]) != 0) {
+				fprintf(stderr, "kitten: invalid preview limit\n");
+				return 1;
+			}
+			++first_path;
+			continue;
+		}
+
+		if (strncmp(argv[first_path], "--max-bytes=", 12) == 0) {
+			if (set_preview_limit(argv[first_path] + 12) != 0) {
+				fprintf(stderr, "kitten: invalid preview limit\n");
+				return 1;
+			}
+			++first_path;
+			continue;
+		}
+
+		if (argv[first_path][0] == '-' && argv[first_path][1]) {
+			fprintf(stderr, "kitten: unknown option: %s\n", argv[first_path]);
 			return 1;
 		}
 
-		walk_path(".", "", 1, 1);
-		return 0;
+		break;
 	}
 
-	for (i = 1; i < argc; ++i) {
-		if (i > 1)
+	if (first_path == argc) {
+		return print_entry(".", "", 1, 1) != 0;
+	}
+
+	if (first_path == argc - 1 && lstat(argv[first_path], &st) == 0 && S_ISDIR(st.st_mode)) {
+		if (chdir(argv[first_path]) != 0) {
+			fprintf(stderr, "kitten: %s: %s\n", argv[first_path], strerror(errno));
+			return 1;
+		}
+
+		return print_entry(".", "", 1, 1) != 0;
+	}
+
+	for (i = first_path; i < argc; ++i) {
+		if (i > first_path)
 			putchar('\n');
-		walk_path(argv[i], "", i == argc - 1, 1);
+		if (print_entry(argv[i], "", i == argc - 1, 1) != 0)
+			had_error = 1;
 	}
 
-	return 0;
+	return had_error;
 }
