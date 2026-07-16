@@ -1,225 +1,75 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include <dirent.h>
+#include "kitten.h"
+
 #include <errno.h>
-#include <fnmatch.h>
+#include <fcntl.h>
+#include <langinfo.h>
 #include <limits.h>
-#include <stdio.h>
+#include <locale.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#define DEFAULT_PREVIEW_LIMIT ((size_t)256 * 1024)
+enum argument_error_id {
+	ERROR_PREVIEW_LIMIT,
+	ERROR_DEPTH,
+	ERROR_EXCLUDE,
+	ERROR_CONTENT_MODE,
+	ERROR_LANGUAGE,
+	ERROR_UNKNOWN_OPTION
+};
 
-static size_t content_preview_limit = DEFAULT_PREVIEW_LIMIT;
-static long max_depth = -1;
-static int show_content = 1;
-static int ascii_tree;
-static int show_summary;
-
-static char **exclude_patterns;
-static size_t exclude_count;
-
-static unsigned long total_dirs;
-static unsigned long total_files;
-static unsigned long total_symlinks;
-static unsigned long total_special;
-static unsigned long total_skipped;
-static unsigned long total_errors;
-static unsigned long long total_bytes;
-
-static const char *branch_for(int is_last)
+static int locale_is_russian(void)
 {
-	if (ascii_tree)
-		return is_last ? "`--" : "|--";
-	return is_last ? "└──" : "├──";
+	const char *name = setlocale(LC_MESSAGES, NULL);
+
+	return name && (name[0] == 'r' || name[0] == 'R') &&
+	    (name[1] == 'u' || name[1] == 'U') &&
+	    (!name[2] || name[2] == '_' || name[2] == '-' || name[2] == '.');
 }
 
-static const char *stem_for(int is_last)
+static int locale_is_utf8(void)
 {
-	if (ascii_tree)
-		return is_last ? "    " : "|   ";
-	return is_last ? "    " : "│   ";
+	const char *codeset = nl_langinfo(CODESET);
+
+	return codeset &&
+	    (strcasecmp(codeset, "UTF-8") == 0 || strcasecmp(codeset, "UTF8") == 0);
 }
 
-static int show_dirent(const struct dirent *entry)
+static int set_language(struct kitten_options *options, const char *name)
 {
-	return strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0;
-}
-
-static int is_excluded(const char *path, const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < exclude_count; ++i) {
-		if (fnmatch(exclude_patterns[i], name, 0) == 0 ||
-		    fnmatch(exclude_patterns[i], path, FNM_PATHNAME) == 0)
-			return 1;
-		if (path[0] == '.' && path[1] == '/' &&
-		    fnmatch(exclude_patterns[i], path + 2, FNM_PATHNAME) == 0)
-			return 1;
-	}
-
+	if (strcmp(name, "auto") == 0)
+		options->russian = locale_is_russian();
+	else if (strcmp(name, "en") == 0)
+		options->russian = 0;
+	else if (strcmp(name, "ru") == 0)
+		options->russian = 1;
+	else
+		return -1;
 	return 0;
 }
 
-static int add_exclude(const char *pattern)
-{
-	char **patterns;
-	char *copy;
-
-	if (!pattern[0])
-		return -1;
-
-	copy = strdup(pattern);
-	if (!copy)
-		return -1;
-
-	patterns = realloc(exclude_patterns, (exclude_count + 1) * sizeof(*exclude_patterns));
-	if (!patterns) {
-		free(copy);
-		return -1;
-	}
-
-	exclude_patterns = patterns;
-	exclude_patterns[exclude_count++] = copy;
-	return 0;
-}
-
-static char *join_path(const char *left, const char *right)
-{
-	size_t left_len = strlen(left);
-	size_t right_len = strlen(right);
-	int need_slash = left_len > 0 && left[left_len - 1] != '/';
-	char *path = malloc(left_len + right_len + (need_slash ? 2 : 1));
-
-	if (!path)
-		return NULL;
-
-	memcpy(path, left, left_len);
-	if (need_slash)
-		path[left_len++] = '/';
-	memcpy(path + left_len, right, right_len);
-	path[left_len + right_len] = '\0';
-	return path;
-}
-
-static int has_nul_byte(FILE *fp)
-{
-	unsigned char buf[4096];
-	size_t nread;
-	size_t i;
-
-	nread = fread(buf, 1, sizeof(buf), fp);
-	if (nread == 0) {
-		rewind(fp);
-		return 0;
-	}
-
-	for (i = 0; i < nread; ++i) {
-		if (buf[i] == '\0') {
-			rewind(fp);
-			return 1;
-		}
-	}
-
-	rewind(fp);
-	return 0;
-}
-
-static int print_file_preview(const char *path, const char *prefix, off_t size)
-{
-	FILE *fp;
-	char *line = NULL;
-	size_t cap = 0;
-	size_t bytes_read = 0;
-	size_t line_bytes;
-	ssize_t nread;
-	int saw_content = 0;
-	int had_error = 0;
-
-	printf("%s%s contents\n", prefix, ascii_tree ? "+--" : "┌──");
-
-	if (size > (off_t)content_preview_limit) {
-		printf("%s%s [skipped: %lld bytes exceeds %zu byte limit]\n",
-		    prefix, ascii_tree ? "|" : "│",
-		    (long long)size, content_preview_limit);
-		printf("%s%s\n", prefix, ascii_tree ? "`--" : "└──");
-		++total_skipped;
-		return 0;
-	}
-
-	fp = fopen(path, "rb");
-	if (!fp) {
-		printf("%s%s [cannot open: %s]\n", prefix, ascii_tree ? "|" : "│", strerror(errno));
-		printf("%s%s\n", prefix, ascii_tree ? "`--" : "└──");
-		++total_errors;
-		return 1;
-	}
-
-	if (has_nul_byte(fp)) {
-		printf("%s%s [binary file]\n", prefix, ascii_tree ? "|" : "│");
-		fclose(fp);
-		printf("%s%s\n", prefix, ascii_tree ? "`--" : "└──");
-		++total_skipped;
-		return 0;
-	}
-
-	while ((nread = getline(&line, &cap, fp)) != -1) {
-		line_bytes = (size_t)nread;
-		if (line_bytes > content_preview_limit - bytes_read) {
-			printf("%s%s [truncated after %zu bytes]\n",
-			    prefix, ascii_tree ? "|" : "│", content_preview_limit);
-			++total_skipped;
-			saw_content = 1;
-			break;
-		}
-		bytes_read += line_bytes;
-		while (nread > 0 && (line[nread - 1] == '\n' || line[nread - 1] == '\r'))
-			line[--nread] = '\0';
-		if (nread == 0)
-			printf("%s%s\n", prefix, ascii_tree ? "|" : "│");
-		else
-			printf("%s%s %s\n", prefix, ascii_tree ? "|" : "│", line);
-		saw_content = 1;
-	}
-
-	if (ferror(fp)) {
-		printf("%s%s [read error]\n", prefix, ascii_tree ? "|" : "│");
-		had_error = 1;
-		++total_errors;
-	} else if (!saw_content) {
-		printf("%s%s [empty file]\n", prefix, ascii_tree ? "|" : "│");
-	}
-
-	free(line);
-	fclose(fp);
-	printf("%s%s\n", prefix, ascii_tree ? "`--" : "└──");
-	return had_error;
-}
-
-static int print_entry(const char *path, const char *prefix, int is_last, int is_root, long depth);
-
-static int set_depth_limit(const char *text)
+static int set_depth_limit(struct kitten_options *options, const char *text)
 {
 	char *end;
 	unsigned long value;
 
 	if (!text[0] || text[0] == '-')
 		return -1;
-
 	errno = 0;
 	value = strtoul(text, &end, 10);
 	if (errno == ERANGE || end == text || *end || value > LONG_MAX)
 		return -1;
-
-	max_depth = (long)value;
+	options->max_depth = (long)value;
 	return 0;
 }
 
-static int set_preview_limit(const char *text)
+static int set_preview_limit(struct kitten_options *options, const char *text)
 {
 	char *end;
 	unsigned long long value;
@@ -228,7 +78,6 @@ static int set_preview_limit(const char *text)
 
 	if (!text[0] || text[0] == '-')
 		return -1;
-
 	errno = 0;
 	value = strtoull(text, &end, 10);
 	if (errno == ERANGE || end == text)
@@ -252,394 +101,389 @@ static int set_preview_limit(const char *text)
 	total = value * scale;
 	if (total > (unsigned long long)(size_t)-1)
 		return -1;
-
-	content_preview_limit = (size_t)total;
+	options->preview_limit = (size_t)total;
 	return 0;
 }
 
-static int set_content_mode(const char *text)
+static int set_content_mode(struct kitten_options *options, const char *text)
 {
-	if (strcmp(text, "auto") == 0) {
-		show_content = 1;
-		return 0;
-	}
-
-	if (strcmp(text, "never") == 0) {
-		show_content = 0;
-		return 0;
-	}
-
-	return -1;
+	if (strcmp(text, "auto") == 0)
+		options->show_content = 1;
+	else if (strcmp(text, "never") == 0)
+		options->show_content = 0;
+	else
+		return -1;
+	return 0;
 }
 
-static void print_summary(void)
+static int add_exclude(struct kitten_options *options, const char *pattern)
 {
-	printf("\nsummary:\n");
-	printf("  directories: %lu\n", total_dirs);
-	printf("  files:       %lu\n", total_files);
-	printf("  symlinks:    %lu\n", total_symlinks);
-	printf("  special:     %lu\n", total_special);
-	printf("  bytes:       %llu\n", total_bytes);
-	printf("  skipped:     %lu\n", total_skipped);
-	printf("  errors:      %lu\n", total_errors);
+	char **patterns;
+	char *copy;
+
+	if (!pattern[0] || options->exclude_count >= SIZE_MAX / sizeof(*patterns))
+		return -1;
+	copy = strdup(pattern);
+	if (!copy)
+		return -1;
+	patterns = realloc(options->exclude_patterns,
+	    (options->exclude_count + 1) * sizeof(*patterns));
+	if (!patterns) {
+		free(copy);
+		return -1;
+	}
+	options->exclude_patterns = patterns;
+	options->exclude_patterns[options->exclude_count++] = copy;
+	return 0;
 }
 
-static int print_directory(const char *path, const char *prefix, long depth)
+static void print_usage(const char *argv0, int russian)
 {
-	struct dirent **entries = NULL;
-	int count = scandir(path, &entries, show_dirent, alphasort);
+	if (russian) {
+		fputs("Использование: ", stdout);
+		kitten_print_escaped(stdout, argv0);
+		fputs(" [ПАРАМЕТР]... [ПУТЬ]...\n\n"
+		    "Печатает дерево путей с метаданными и просмотром текста.\n"
+		    "Без путей просматривается текущий каталог. Параметры можно\n"
+		    "указывать до или после путей.\n\n"
+		    "  -m, --max-bytes=БАЙТЫ  лимит просмотра файла (по умолчанию 256K)\n"
+		    "  -L, --depth=ГЛУБИНА     максимальная глубина обхода\n"
+		    "      --exclude=ШАБЛОН    исключить совпавшие имена или пути\n"
+		    "      --no-content        не показывать содержимое файлов\n"
+		    "      --content=РЕЖИМ     режим просмотра: auto или never\n"
+		    "      --raw-content       не экранировать содержимое файлов\n"
+		    "      --dirs-only         показывать только каталоги\n"
+		    "  -H, --human-readable    размеры в KiB, MiB, GiB и TiB\n"
+		    "  -U, --unsorted          обходить каталог без сортировки\n"
+		    "      --ascii             использовать ASCII-ветви\n"
+		    "      --unicode           использовать Unicode-ветви\n"
+		    "      --summary           напечатать итоговые счётчики\n"
+		    "      --language=ЯЗЫК     язык сообщений: auto, en или ru\n"
+		    "      --version           напечатать версию и лицензию\n"
+		    "  -h, --help              показать эту справку\n\n"
+		    "БАЙТЫ принимают суффикс K, M или G. '--' завершает разбор\n"
+		    "параметров. Unicode автоматически выбирается в UTF-8-локали.\n\n"
+		    "Примеры:\n"
+		    "  kitten --no-content --summary src\n"
+		    "  kitten -L 2 -m 64K --exclude=.git .\n"
+		    "  kitten --language=ru -H README.md\n",
+		    stdout);
+	} else {
+		fputs("Usage: ", stdout);
+		kitten_print_escaped(stdout, argv0);
+		fputs(" [OPTION]... [PATH]...\n\n"
+		    "Print a tree of paths with metadata and text previews.\n"
+		    "With no path, inspect the current directory. Options may appear\n"
+		    "before or after path operands.\n\n"
+		    "  -m, --max-bytes=BYTES   per-file preview limit (default: 256K)\n"
+		    "  -L, --depth=DEPTH       maximum traversal depth\n"
+		    "      --exclude=PATTERN   skip matching names or paths\n"
+		    "      --no-content        do not show file contents\n"
+		    "      --content=WHEN      preview mode: auto or never\n"
+		    "      --raw-content       do not escape file contents\n"
+		    "      --dirs-only         show directories only\n"
+		    "  -H, --human-readable    print sizes in KiB, MiB, GiB, and TiB\n"
+		    "  -U, --unsorted          traverse in filesystem order\n"
+		    "      --ascii             use ASCII tree drawing\n"
+		    "      --unicode           use Unicode tree drawing\n"
+		    "      --summary           print totals after the tree\n"
+		    "      --language=LANG     message language: auto, en, or ru\n"
+		    "      --version           print version and license information\n"
+		    "  -h, --help              display this help and exit\n\n"
+		    "BYTES accepts a K, M, or G suffix. '--' ends option parsing.\n"
+		    "Unicode drawing is selected automatically in a UTF-8 locale.\n\n"
+		    "Examples:\n"
+		    "  kitten --no-content --summary src\n"
+		    "  kitten -L 2 -m 64K --exclude=.git .\n"
+		    "  kitten --language=ru -H README.md\n",
+		    stdout);
+	}
+}
+
+static void print_version(int russian)
+{
+	printf("kitten %s\n", KITTEN_VERSION);
+	if (russian) {
+		fputs("Copyright (c) 2026, участники kitten\n"
+		    "Лицензия BSD-2-Clause. Программа предоставляется без гарантий.\n",
+		    stdout);
+	} else {
+		fputs("Copyright (c) 2026, kitten contributors\n"
+		    "License BSD-2-Clause. This software comes with no warranty.\n",
+		    stdout);
+	}
+}
+
+static void select_argument_language(struct kitten_options *options,
+    int argc, char **argv)
+{
 	int i;
-	int j;
-	int had_error = 0;
-	int is_last_visible;
 
-	if (count < 0) {
-		printf("%s%s [cannot read directory: %s]\n",
-		    prefix, branch_for(1), strerror(errno));
-		++total_errors;
-		return 1;
-	}
-
-	if (count == 0) {
-		printf("%s%s [empty directory]\n", prefix, branch_for(1));
-		free(entries);
-		return 0;
-	}
-
-	for (i = 0; i < count; ++i) {
-		char *child_path = join_path(path, entries[i]->d_name);
-
-		if (!child_path) {
-			printf("%s%s %s [out of memory]\n",
-			    prefix, branch_for(i == count - 1), entries[i]->d_name);
-			had_error = 1;
-			++total_errors;
-			free(entries[i]);
-			continue;
+	for (i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--") == 0)
+			break;
+		if (strcmp(argv[i], "--language") == 0) {
+			if (i + 1 < argc)
+				set_language(options, argv[++i]);
+		} else if (strncmp(argv[i], "--language=", 11) == 0) {
+			set_language(options, argv[i] + 11);
+		} else if (strcmp(argv[i], "-m") == 0 ||
+		    strcmp(argv[i], "--max-bytes") == 0 ||
+		    strcmp(argv[i], "-L") == 0 ||
+		    strcmp(argv[i], "--depth") == 0 ||
+		    strcmp(argv[i], "--exclude") == 0 ||
+		    strcmp(argv[i], "--content") == 0) {
+			if (i + 1 < argc)
+				++i;
 		}
-
-		if (is_excluded(child_path, entries[i]->d_name)) {
-			++total_skipped;
-			free(child_path);
-			free(entries[i]);
-			continue;
-		}
-
-		is_last_visible = 1;
-		for (j = i + 1; j < count; ++j) {
-			char *next_path = join_path(path, entries[j]->d_name);
-
-			if (!next_path || !is_excluded(next_path, entries[j]->d_name)) {
-				free(next_path);
-				is_last_visible = 0;
-				break;
-			}
-			free(next_path);
-		}
-
-		if (print_entry(child_path, prefix, is_last_visible, 0, depth) != 0)
-			had_error = 1;
-		free(child_path);
-		free(entries[i]);
 	}
-
-	free(entries);
-	return had_error;
 }
 
-static int print_entry(const char *path, const char *prefix, int is_last, int is_root, long depth)
+static const char *argument_error_text(enum argument_error_id id, int russian)
+{
+	if (russian) {
+		switch (id) {
+		case ERROR_PREVIEW_LIMIT: return "недопустимый лимит просмотра";
+		case ERROR_DEPTH: return "недопустимая глубина";
+		case ERROR_EXCLUDE: return "недопустимый шаблон исключения";
+		case ERROR_CONTENT_MODE: return "недопустимый режим содержимого";
+		case ERROR_LANGUAGE: return "недопустимый язык";
+		case ERROR_UNKNOWN_OPTION: return "неизвестный параметр";
+		}
+	}
+
+	switch (id) {
+	case ERROR_PREVIEW_LIMIT: return "invalid preview limit";
+	case ERROR_DEPTH: return "invalid depth";
+	case ERROR_EXCLUDE: return "invalid exclude pattern";
+	case ERROR_CONTENT_MODE: return "invalid content mode";
+	case ERROR_LANGUAGE: return "invalid language";
+	case ERROR_UNKNOWN_OPTION: return "unknown option";
+	}
+	return "invalid argument";
+}
+
+static void free_options(struct kitten_options *options)
+{
+	size_t i;
+
+	for (i = 0; i < options->exclude_count; ++i)
+		free(options->exclude_patterns[i]);
+	free(options->exclude_patterns);
+}
+
+static int finish_program(struct kitten_options *options, int status)
+{
+	if (fflush(stdout) == EOF || ferror(stdout))
+		status = 1;
+	if (fflush(stderr) == EOF || ferror(stderr))
+		status = 1;
+	free_options(options);
+	return status;
+}
+
+static int argument_error(struct kitten_options *options,
+    enum argument_error_id id, const char *argument)
+{
+	fprintf(stderr, "kitten: %s", argument_error_text(id, options->russian));
+	if (argument) {
+		fputs(": ", stderr);
+		kitten_print_escaped(stderr, argument);
+	}
+	fputc('\n', stderr);
+	return finish_program(options, 1);
+}
+
+static int enter_directory(const char *path, const struct stat *expected,
+    int *changed)
 {
 	struct stat st;
-	const char *slash = strrchr(path, '/');
-	const char *name = is_root || !slash ? path : slash + 1;
-	const char *branch = branch_for(is_last);
-	char *next_prefix;
-	const char *tail;
-	size_t prefix_len;
+	int fd;
+	int saved_errno;
 
-	if (lstat(path, &st) != 0) {
-		if (is_root)
-			printf("%s [not found: %s]\n", path, strerror(errno));
-		else
-			printf("%s%s %s [not found: %s]\n", prefix, branch, name, strerror(errno));
-		++total_errors;
-		return 1;
+	*changed = 0;
+	fd = open(path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_NOFOLLOW);
+	if (fd < 0)
+		return -1;
+	if (fstat(fd, &st) != 0) {
+		saved_errno = errno;
+		close(fd);
+		errno = saved_errno;
+		return -1;
 	}
-
-	if (S_ISLNK(st.st_mode)) {
-		char target[4096];
-		ssize_t len = readlink(path, target, sizeof(target) - 1);
-		int saved_errno = errno;
-
-		if (len >= 0)
-			target[len] = '\0';
-
-		if (is_root)
-			printf("%s [symlink -> %s]\n", path, len >= 0 ? target : strerror(saved_errno));
-		else
-			printf("%s%s %s -> %s [symlink]\n", prefix, branch, name,
-			    len >= 0 ? target : strerror(saved_errno));
-
-		++total_symlinks;
-		if (len < 0)
-			++total_errors;
-		return len < 0;
+	if (!S_ISDIR(st.st_mode) || st.st_dev != expected->st_dev ||
+	    st.st_ino != expected->st_ino) {
+		close(fd);
+		*changed = 1;
+		return -1;
 	}
-
-	if (is_root) {
-		if (S_ISDIR(st.st_mode)) {
-			++total_dirs;
-			printf("%s/\n", path);
-			if (max_depth == 0)
-				return 0;
-			next_prefix = strdup("");
-			if (!next_prefix) {
-				printf("%s [out of memory]\n", branch_for(1));
-				++total_errors;
-				return 1;
-			}
-			if (print_directory(path, next_prefix, 1) != 0) {
-				free(next_prefix);
-				return 1;
-			}
-			free(next_prefix);
-			return 0;
-		}
-
-		if (S_ISREG(st.st_mode)) {
-			++total_files;
-			total_bytes += (unsigned long long)st.st_size;
-			printf("%s [file, %lld bytes]\n", path, (long long)st.st_size);
-			if (!show_content)
-				return 0;
-			next_prefix = strdup("    ");
-			if (!next_prefix) {
-				printf("    [out of memory]\n");
-				++total_errors;
-				return 1;
-			}
-			if (print_file_preview(path, next_prefix, st.st_size) != 0) {
-				free(next_prefix);
-				return 1;
-			}
-			free(next_prefix);
-			return 0;
-		}
-
-		++total_special;
-		printf("%s [special file, %lld bytes]\n", path, (long long)st.st_size);
-		return 0;
+	if (fchdir(fd) != 0) {
+		saved_errno = errno;
+		close(fd);
+		errno = saved_errno;
+		return -1;
 	}
-
-	if (S_ISDIR(st.st_mode)) {
-		++total_dirs;
-		printf("%s%s %s/\n", prefix, branch, name);
-		if (max_depth >= 0 && depth >= max_depth)
-			return 0;
-		tail = stem_for(is_last);
-		prefix_len = strlen(prefix);
-		next_prefix = malloc(prefix_len + 5);
-		if (!next_prefix) {
-			printf("%s%s [out of memory]\n", prefix, stem_for(is_last));
-			++total_errors;
-			return 1;
-		}
-		memcpy(next_prefix, prefix, prefix_len);
-		memcpy(next_prefix + prefix_len, tail, 4);
-		next_prefix[prefix_len + 4] = '\0';
-		if (print_directory(path, next_prefix, depth + 1) != 0) {
-			free(next_prefix);
-			return 1;
-		}
-		free(next_prefix);
-		return 0;
-	}
-
-	if (S_ISREG(st.st_mode)) {
-		++total_files;
-		total_bytes += (unsigned long long)st.st_size;
-		printf("%s%s %s [file, %lld bytes]\n", prefix, branch, name, (long long)st.st_size);
-		if (!show_content)
-			return 0;
-		tail = stem_for(is_last);
-		prefix_len = strlen(prefix);
-		next_prefix = malloc(prefix_len + 5);
-		if (!next_prefix) {
-			printf("%s%s [out of memory]\n", prefix, stem_for(is_last));
-			++total_errors;
-			return 1;
-		}
-		memcpy(next_prefix, prefix, prefix_len);
-		memcpy(next_prefix + prefix_len, tail, 4);
-		next_prefix[prefix_len + 4] = '\0';
-		if (print_file_preview(path, next_prefix, st.st_size) != 0) {
-			free(next_prefix);
-			return 1;
-		}
-		free(next_prefix);
-		return 0;
-	}
-
-	++total_special;
-	printf("%s%s %s [special file, %lld bytes]\n", prefix, branch, name, (long long)st.st_size);
+	close(fd);
 	return 0;
-}
-
-static void print_usage(const char *argv0)
-{
-	printf("Usage: %s [OPTION]... [PATH]...\n", argv0);
-	printf("\n");
-	printf("Print a tree view of the given paths and show text file contents inline.\n");
-	printf("When no path is provided, kitten inspects the current directory.\n");
-	printf("A single directory argument is opened in place before the tree is shown.\n");
-	printf("\n");
-	printf("Options:\n");
-	printf("  -m, --max-bytes=BYTES   change the per-file content preview limit\n");
-	printf("  -L, --depth=DEPTH       descend at most DEPTH directory levels\n");
-	printf("      --exclude=PATTERN   skip names or paths matching PATTERN\n");
-	printf("      --no-content        print only the tree and file metadata\n");
-	printf("      --content=WHEN      show content previews: auto or never\n");
-	printf("      --ascii             use ASCII tree drawing characters\n");
-	printf("      --summary           print counts after the tree\n");
-	printf("  -h, --help              display this help and exit\n");
 }
 
 int main(int argc, char **argv)
 {
-	int i;
-	int first_path = 1;
+	struct kitten_options options;
+	struct kitten_totals totals;
+	struct kitten_context context;
 	struct stat st;
+	int parse_options = 1;
+	int path_count = 0;
 	int had_error = 0;
+	int show_summary = 0;
+	int changed;
+	int i;
 
-	while (first_path < argc) {
-		if (strcmp(argv[first_path], "--") == 0) {
-			++first_path;
-			break;
-		}
+	memset(&options, 0, sizeof(options));
+	memset(&totals, 0, sizeof(totals));
+	options.preview_limit = DEFAULT_PREVIEW_LIMIT;
+	options.max_depth = -1;
+	options.show_content = 1;
+	context.options = &options;
+	context.totals = &totals;
 
-		if (strcmp(argv[first_path], "-h") == 0 || strcmp(argv[first_path], "--help") == 0) {
-			print_usage(argv[0]);
-			return 0;
-		}
+	setlocale(LC_ALL, "");
+	options.russian = locale_is_russian();
+	options.unicode_tree = locale_is_utf8();
+	/* Diagnostics should honor --language even when it follows a bad option. */
+	select_argument_language(&options, argc, argv);
 
-		if (strcmp(argv[first_path], "-m") == 0 || strcmp(argv[first_path], "--max-bytes") == 0) {
-			if (++first_path == argc || set_preview_limit(argv[first_path]) != 0) {
-				fprintf(stderr, "kitten: invalid preview limit\n");
-				return 1;
-			}
-			++first_path;
+	for (i = 1; i < argc; ++i) {
+		const char *argument = argv[i];
+
+		if (parse_options && strcmp(argument, "--") == 0) {
+			parse_options = 0;
 			continue;
 		}
-
-		if (strncmp(argv[first_path], "--max-bytes=", 12) == 0) {
-			if (set_preview_limit(argv[first_path] + 12) != 0) {
-				fprintf(stderr, "kitten: invalid preview limit\n");
-				return 1;
-			}
-			++first_path;
+		if (!parse_options || argument[0] != '-' || argument[1] == '\0') {
+			argv[++path_count] = argv[i];
 			continue;
 		}
-
-		if (strcmp(argv[first_path], "-L") == 0 || strcmp(argv[first_path], "--depth") == 0) {
-			if (++first_path == argc || set_depth_limit(argv[first_path]) != 0) {
-				fprintf(stderr, "kitten: invalid depth\n");
-				return 1;
-			}
-			++first_path;
+		if (strcmp(argument, "-h") == 0 || strcmp(argument, "--help") == 0) {
+			print_usage(argv[0], options.russian);
+			return finish_program(&options, 0);
+		}
+		if (strcmp(argument, "--version") == 0) {
+			print_version(options.russian);
+			return finish_program(&options, 0);
+		}
+		if (strcmp(argument, "-m") == 0 || strcmp(argument, "--max-bytes") == 0) {
+			if (++i == argc || set_preview_limit(&options, argv[i]) != 0)
+				return argument_error(&options, ERROR_PREVIEW_LIMIT,
+				    i < argc ? argv[i] : NULL);
 			continue;
 		}
-
-		if (strncmp(argv[first_path], "--depth=", 8) == 0) {
-			if (set_depth_limit(argv[first_path] + 8) != 0) {
-				fprintf(stderr, "kitten: invalid depth\n");
-				return 1;
-			}
-			++first_path;
+		if (strncmp(argument, "--max-bytes=", 12) == 0) {
+			if (set_preview_limit(&options, argument + 12) != 0)
+				return argument_error(&options, ERROR_PREVIEW_LIMIT, argument + 12);
 			continue;
 		}
-
-		if (strcmp(argv[first_path], "--exclude") == 0) {
-			if (++first_path == argc || add_exclude(argv[first_path]) != 0) {
-				fprintf(stderr, "kitten: invalid exclude pattern\n");
-				return 1;
-			}
-			++first_path;
+		if (strcmp(argument, "-L") == 0 || strcmp(argument, "--depth") == 0) {
+			if (++i == argc || set_depth_limit(&options, argv[i]) != 0)
+				return argument_error(&options, ERROR_DEPTH, i < argc ? argv[i] : NULL);
 			continue;
 		}
-
-		if (strncmp(argv[first_path], "--exclude=", 10) == 0) {
-			if (add_exclude(argv[first_path] + 10) != 0) {
-				fprintf(stderr, "kitten: invalid exclude pattern\n");
-				return 1;
-			}
-			++first_path;
+		if (strncmp(argument, "--depth=", 8) == 0) {
+			if (set_depth_limit(&options, argument + 8) != 0)
+				return argument_error(&options, ERROR_DEPTH, argument + 8);
 			continue;
 		}
-
-		if (strcmp(argv[first_path], "--no-content") == 0) {
-			show_content = 0;
-			++first_path;
+		if (strcmp(argument, "--exclude") == 0) {
+			if (++i == argc || add_exclude(&options, argv[i]) != 0)
+				return argument_error(&options, ERROR_EXCLUDE, i < argc ? argv[i] : NULL);
 			continue;
 		}
-
-		if (strcmp(argv[first_path], "--content") == 0) {
-			if (++first_path == argc || set_content_mode(argv[first_path]) != 0) {
-				fprintf(stderr, "kitten: invalid content mode\n");
-				return 1;
-			}
-			++first_path;
+		if (strncmp(argument, "--exclude=", 10) == 0) {
+			if (add_exclude(&options, argument + 10) != 0)
+				return argument_error(&options, ERROR_EXCLUDE, argument + 10);
 			continue;
 		}
-
-		if (strncmp(argv[first_path], "--content=", 10) == 0) {
-			if (set_content_mode(argv[first_path] + 10) != 0) {
-				fprintf(stderr, "kitten: invalid content mode\n");
-				return 1;
-			}
-			++first_path;
+		if (strcmp(argument, "--no-content") == 0) {
+			options.show_content = 0;
 			continue;
 		}
-
-		if (strcmp(argv[first_path], "--ascii") == 0) {
-			ascii_tree = 1;
-			++first_path;
+		if (strcmp(argument, "--content") == 0) {
+			if (++i == argc || set_content_mode(&options, argv[i]) != 0)
+				return argument_error(&options, ERROR_CONTENT_MODE,
+				    i < argc ? argv[i] : NULL);
 			continue;
 		}
-
-		if (strcmp(argv[first_path], "--summary") == 0) {
+		if (strncmp(argument, "--content=", 10) == 0) {
+			if (set_content_mode(&options, argument + 10) != 0)
+				return argument_error(&options, ERROR_CONTENT_MODE, argument + 10);
+			continue;
+		}
+		if (strcmp(argument, "--raw-content") == 0) {
+			options.raw_content = 1;
+			continue;
+		}
+		if (strcmp(argument, "--dirs-only") == 0) {
+			options.dirs_only = 1;
+			continue;
+		}
+		if (strcmp(argument, "--language") == 0) {
+			if (++i == argc || set_language(&options, argv[i]) != 0)
+				return argument_error(&options, ERROR_LANGUAGE, i < argc ? argv[i] : NULL);
+			continue;
+		}
+		if (strncmp(argument, "--language=", 11) == 0) {
+			if (set_language(&options, argument + 11) != 0)
+				return argument_error(&options, ERROR_LANGUAGE, argument + 11);
+			continue;
+		}
+		if (strcmp(argument, "--ascii") == 0) {
+			options.unicode_tree = 0;
+			continue;
+		}
+		if (strcmp(argument, "--unicode") == 0) {
+			options.unicode_tree = 1;
+			continue;
+		}
+		if (strcmp(argument, "--summary") == 0) {
 			show_summary = 1;
-			++first_path;
 			continue;
 		}
-
-		if (argv[first_path][0] == '-' && argv[first_path][1]) {
-			fprintf(stderr, "kitten: unknown option: %s\n", argv[first_path]);
-			return 1;
+		if (strcmp(argument, "-H") == 0 || strcmp(argument, "--human-readable") == 0) {
+			options.human_readable = 1;
+			continue;
 		}
-
-		break;
+		if (strcmp(argument, "-U") == 0 || strcmp(argument, "--unsorted") == 0) {
+			options.unsorted = 1;
+			continue;
+		}
+		return argument_error(&options, ERROR_UNKNOWN_OPTION, argument);
 	}
 
-	if (first_path == argc) {
-		had_error = print_entry(".", "", 1, 1, 0) != 0;
-	} else if (first_path == argc - 1 && lstat(argv[first_path], &st) == 0 && S_ISDIR(st.st_mode)) {
-		if (chdir(argv[first_path]) != 0) {
-			fprintf(stderr, "kitten: %s: %s\n", argv[first_path], strerror(errno));
-			return 1;
+	if (path_count == 0) {
+		had_error = kitten_walk_path(&context, ".", 1) != 0;
+	} else if (path_count == 1 && lstat(argv[1], &st) == 0 && S_ISDIR(st.st_mode)) {
+		if (enter_directory(argv[1], &st, &changed) != 0) {
+			fputs("kitten: ", stderr);
+			kitten_print_escaped(stderr, argv[1]);
+			if (changed)
+				fputs(options.russian ? ": каталог изменился во время открытия\n" :
+				    ": directory changed while opening\n", stderr);
+			else
+				fprintf(stderr, ": %s\n", strerror(errno));
+			return finish_program(&options, 1);
 		}
-
-		had_error = print_entry(".", "", 1, 1, 0) != 0;
+		had_error = kitten_walk_path(&context, ".", 1) != 0;
 	} else {
-		for (i = first_path; i < argc; ++i) {
-			if (i > first_path)
+		for (i = 1; i <= path_count; ++i) {
+			if (i > 1)
 				putchar('\n');
-			if (print_entry(argv[i], "", i == argc - 1, 1, 0) != 0)
+			if (kitten_walk_path(&context, argv[i], i == path_count) != 0)
 				had_error = 1;
 		}
 	}
 
 	if (show_summary)
-		print_summary();
-
-	return had_error;
+		kitten_print_summary(&context);
+	return finish_program(&options, had_error);
 }

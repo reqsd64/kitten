@@ -1,0 +1,418 @@
+\input texinfo
+@setfilename kitten.info
+@settitle kitten manual
+@documentencoding UTF-8
+@documentlanguage en
+@set VERSION 0.1.0
+
+@dircategory File utilities
+@direntry
+* kitten: (kitten).             Inspect trees with inline text previews.
+@end direntry
+
+@copying
+This manual documents kitten version @value{VERSION}.
+
+Copyright @copyright{} 2026 kitten contributors.
+
+Permission to use, copy, modify, and distribute this manual under the terms of
+the BSD 2-Clause License is granted.  The complete license appears in
+@ref{License}.
+@end copying
+
+@titlepage
+@title kitten
+@subtitle Source trees with metadata and inline text previews
+@subtitle Version @value{VERSION}
+@author kitten contributors
+@page
+@vskip 0pt plus 1filll
+@insertcopying
+@end titlepage
+
+@contents
+
+@ifnottex
+@node Top
+@top kitten
+
+kitten prints source trees with file metadata and bounded inline text previews.
+This manual describes version @value{VERSION}.
+@end ifnottex
+
+@menu
+* Introduction::                What kitten is designed to do.
+* Invocation::                  Command-line syntax and options.
+* Preview behavior::            Text, binary, and size handling.
+* Traversal::                   Ordering, depth, links, and exclusions.
+* Localization::                Language and tree drawing selection.
+* Output safety::               Escaping and changing filesystems.
+* Building and installation::   Compiling and staged installation.
+* Packaging::                   Guidance for distribution packages.
+* Portability::                 Supported interfaces and systems.
+* Exit status::                 Success and failure conditions.
+* License::                     BSD 2-Clause License.
+@end menu
+
+@node Introduction
+@chapter Introduction
+
+@command{kitten} fills the gap between a directory-only tree and opening every
+file separately.  It prints a sorted hierarchy, identifies each entry, shows
+regular-file sizes, and places small text files directly below their tree node.
+
+Typical uses include:
+
+@itemize @bullet
+@item reviewing a small source tree without repeatedly opening files;
+@item attaching bounded context to a bug report or review note;
+@item preparing a readable project snapshot for another tool;
+@item identifying empty, binary, oversized, unreadable, or unusual entries;
+@item inspecting directory structure without following symbolic links.
+@end itemize
+
+The program deliberately has a narrow scope.  It does not modify files, follow
+symbolic links, interpret ignore files, provide a transactional filesystem
+snapshot, or replace general archiving and search tools.
+
+@node Invocation
+@chapter Invocation
+
+The general form is:
+
+@example
+kitten [@var{option}]... [@var{path}]...
+@end example
+
+With no path, kitten inspects the current directory.  When exactly one operand
+names a real directory, kitten changes into it and prints @file{./} as the root.
+Multiple operands are printed as separate roots in argument order.
+
+Options may appear before or after path operands.  @option{--} ends option
+parsing.  A single @file{-} is always a path; any other path beginning with a
+hyphen must follow @option{--}.
+
+@menu
+* Preview options::             Selecting and limiting contents.
+* Traversal options::           Depth, exclusions, and ordering.
+* Display options::             Sizes, branches, language, and totals.
+@end menu
+
+@node Preview options
+@section Preview options
+
+@table @option
+@item -m @var{bytes}
+@itemx --max-bytes=@var{bytes}
+Set the largest file eligible for an inline preview.  The default is 256K.
+The suffixes @samp{K}, @samp{M}, and @samp{G}, in either letter case, multiply
+the value by powers of 1024.  A suffix must be the final character.  Zero is
+valid and permits only an empty file to reach the preview reader.
+
+The long option accepts both @option{--max-bytes=64K} and
+@option{--max-bytes 64K}.
+
+@item --no-content
+Disable inline contents while retaining the tree and metadata.
+
+@item --content=@var{when}
+Select @samp{auto} to enable normal previews or @samp{never} to disable them.
+The value is intentionally stable and is not translated.  The separated form
+@option{--content never} is also accepted.  When content-setting options are
+repeated, the last one wins.
+
+@item --raw-content
+Print file contents without escaping control bytes.  Names and symbolic-link
+targets remain escaped.  This mode is intended only for trusted files because
+their contents can write terminal control sequences.
+
+@end table
+
+@node Traversal options
+@section Traversal options
+
+@table @option
+@item -L @var{depth}
+@itemx --depth=@var{depth}
+Limit descent to a non-negative number of levels.  Depth zero prints only each
+root.  Depth one includes immediate children without descending into child
+directories.  With no limit, all reachable real directories are traversed.
+
+@item --exclude=@var{pattern}
+Skip entries matched by a shell-style pattern.  The test is made against the
+entry name, the constructed path, and a path with an initial @file{./} removed.
+The option may be repeated.  @code{fnmatch} is called with pathname-aware
+matching for paths, so a wildcard does not cross a slash.
+
+Excluded entries increment the skipped counter.  Their children are not read.
+
+@item --dirs-only
+Print and descend into real directories only.  Regular files, symbolic links,
+and special entries are skipped.
+
+@item -U
+@itemx --unsorted
+Use the order supplied by the filesystem and retain only one pending entry.
+The default collects a directory's names and sorts them according to the active
+locale.  Unsorted mode is useful when a directory is too large to collect
+comfortably in memory.
+@end table
+
+@node Display options
+@section Display options
+
+@table @option
+@item -H
+@itemx --human-readable
+Print binary sizes using KiB, MiB, GiB, and TiB.  Values below 1024 remain in
+bytes.  Exact byte counts are the default and are preferable for machine
+comparisons.
+
+@item --ascii
+Force ASCII branches such as @samp{|--} and @samp{`--}.  Without this option,
+kitten selects Unicode for a UTF-8 locale and ASCII otherwise.
+
+@item --unicode
+Force Unicode branches regardless of the locale.  When @option{--ascii} and
+@option{--unicode} are both present, the last one wins.
+
+@item --summary
+After all roots, print totals for real directories, regular files, symbolic
+links, special files, regular-file bytes, skipped entries, and errors.  A byte
+total that cannot be represented saturates and receives an overflow label.
+
+@item --language=@var{language}
+Select @samp{auto}, @samp{en}, or @samp{ru}.  Auto mode chooses Russian when the
+active message locale begins with @samp{ru} and English otherwise.  This option
+translates labels and diagnostics, not option names, values, paths, or contents.
+
+@item --version
+Print the canonical program name, version, copyright notice, and license
+summary, then exit successfully.
+
+@item -h
+@itemx --help
+Print a localized command summary, defaults, examples, and exit-status note,
+then exit successfully.
+@end table
+
+@node Preview behavior
+@chapter Preview behavior
+
+A regular file is opened only when previews are enabled.  The open is
+non-blocking and refuses a final symbolic link.  kitten then checks the opened
+descriptor with @code{fstat}; a pathname replaced by a FIFO, directory, or link
+therefore cannot make the preview open wait indefinitely.
+
+The size obtained from the opened descriptor is compared with the configured
+limit.  A larger file is labeled and skipped without reading its data.  For an
+eligible file, kitten scans the whole file before printing it.  Any NUL byte
+marks the file as binary, including a NUL after the first 4096 bytes.  A file
+that grows past the limit during this scan is also skipped.
+
+The text pass uses POSIX @code{getline}.  Trailing newline and carriage-return
+bytes become tree line boundaries.  Empty files and empty lines receive visible
+tree framing.  Read failures set the final exit status.
+
+Files can change between the scan and display passes.  kitten bounds the second
+pass independently and reports truncation rather than exceeding the configured
+preview limit.
+
+@node Traversal
+@chapter Traversal
+
+The entries @file{.} and @file{..} are always ignored.  Sorted mode reads names
+from a descriptor-backed directory stream, stores them, and applies locale
+collation before filtering and printing.  @option{--unsorted} processes the
+same stream incrementally in filesystem order.
+
+Each directory is opened non-blocking with final-symlink following disabled and
+converted to a POSIX directory stream.  Symbolic-link targets are read into a
+growing buffer, avoiding fixed @code{PATH_MAX} and 4096-byte assumptions.  A
+symbolic link is printed but never traversed.
+
+Special entries include FIFOs, sockets, devices, and any type that is neither a
+real directory, a regular file, nor a symbolic link.  They are never opened as
+previews.
+
+The tree is a live inspection, not a snapshot.  An entry may disappear or
+change type between directory enumeration and inspection; observable failures
+are printed and cause status 1.
+
+@node Localization
+@chapter Localization
+
+At startup kitten calls @code{setlocale} for the process environment.  The C
+library applies the usual locale precedence, including @env{LC_ALL},
+@env{LC_MESSAGES}, and @env{LANG}.  English is the fallback for every locale
+without a built-in Russian translation.
+
+Use an explicit @option{--language=en} or @option{--language=ru} for logs,
+scripts, examples, and bug reports that require reproducible wording.  System
+error text comes from @code{strerror} and can follow a locale beyond kitten's
+two built-in message sets.
+
+The character encoding reported by @code{nl_langinfo(CODESET)} controls the
+automatic branch style.  Message language and branch style are independent;
+for example, Russian messages can be combined with @option{--ascii}.
+
+@node Output safety
+@chapter Output safety
+
+POSIX filenames and symbolic-link targets may contain newlines, tabs, escape
+bytes, and other controls.  kitten prints controls and backslashes in those
+fields as readable C-style or hexadecimal escapes.  Crafted names therefore
+cannot create fake tree nodes or issue common ANSI terminal commands.
+
+Content previews preserve tabs and valid locale-encoded characters while
+escaping ASCII controls, multibyte control characters, DEL, and invalid encoded
+bytes.  They do not perform character-set conversion or Unicode normalization.
+@option{--raw-content} disables content escaping for trusted files.  Filename
+and symbolic-link-target escaping remains active in every mode.
+
+No-follow descriptor checks compare the opened device and inode with the
+preceding @code{lstat} result.  This closes the most direct pathname replacement
+races, including the regular-file-to-FIFO hang and replacement by another
+regular file.  It does not make traversal transactional: ancestor path
+components and file data can still change while the program runs.
+
+@node Building and installation
+@chapter Building and installation
+
+kitten requires a C99 compiler, POSIX.1-2008 headers and library interfaces,
+and a POSIX-like @command{make}.  It has no third-party runtime libraries.
+
+Build the executable with:
+
+@example
+make
+@end example
+
+The equivalent direct command is:
+
+@example
+cc -std=c99 -Wall -Wextra -Wpedantic -O2 \
+  src/main.c src/walk.c src/output.c -o kitten
+@end example
+
+The Makefile accepts the conventional @code{CC}, @code{CPPFLAGS},
+@code{CFLAGS}, @code{LDFLAGS}, and @code{LDLIBS} overrides.  For example:
+
+@example
+make CC=clang CFLAGS='-O2 -pipe'
+@end example
+
+The default prefix is @file{/usr/local}.  Install the executable and man page
+with:
+
+@example
+make install
+@end example
+
+Use @code{PREFIX} for another hierarchy and @code{DESTDIR} for staging:
+
+@example
+make PREFIX=/usr DESTDIR=/tmp/kitten-package install
+@end example
+
+The Info manual is optional so the ordinary build does not require Texinfo:
+
+@example
+make info
+make PREFIX=/usr DESTDIR=/tmp/kitten-package install-info
+@end example
+
+@command{make clean} removes the executable and rendered Info file.
+@command{make uninstall} removes the paths installed by the selected prefix and
+destination root.
+
+@node Packaging
+@chapter Packaging
+
+Distribution packages should pass their compiler and linker policy flags,
+select @code{PREFIX=/usr}, and install into a package root using @code{DESTDIR}.
+The install target is non-interactive and creates the required directories.
+
+For an Arch-style package, the build and package phases can use:
+
+@example
+build() @{
+  make PREFIX=/usr
+@}
+
+package() @{
+  make PREFIX=/usr DESTDIR="$pkgdir" install
+@}
+@end example
+
+Use the SPDX identifier @samp{BSD-2-Clause}.  A complete upstream PKGBUILD is
+not included until a release archive, stable URL, and checksum exist.
+
+The Texinfo source is supplied for potential GNU evaluation.  GNU normally
+recommends GPL version 3 or later for an accepted package; kitten intentionally
+remains under BSD-2-Clause unless its copyright holders make a separate future
+decision.
+
+@node Portability
+@chapter Portability
+
+The supported baseline is C99 and POSIX.1-2008 on GNU/Linux and BSD systems.
+The implementation uses directory streams, descriptor status checks, POSIX
+pattern matching, locale information, and POSIX line input.  It avoids a fixed
+maximum pathname and does not require GNU @code{getopt_long}.
+
+Native Windows directory APIs are outside the supported scope.  A POSIX
+environment such as Cygwin is required on Windows.  Other Unix-like systems may
+work when they provide the required POSIX.1-2008 interfaces.
+
+@node Exit status
+@chapter Exit status
+
+@table @asis
+@item 0
+Every requested operation completed successfully, or help/version output was
+requested.
+
+@item 1
+An option was invalid, a requested path could not be inspected, traversal or
+reading failed, memory was exhausted, or an output stream reported an error.
+@end table
+
+Binary and oversized previews are expected filtering outcomes and do not by
+themselves cause failure.  With @option{--summary}, the errors field counts
+traversal and read errors observed before the summary is written.  A late
+standard-output failure still changes the process status even though it cannot
+be reflected retroactively in that summary.
+
+@node License
+@appendix BSD 2-Clause License
+
+Copyright (c) 2026, kitten contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+@enumerate
+@item
+Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+@item
+Redistributions in binary form must reproduce the above copyright notice, this
+list of conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.
+@end enumerate
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+@bye

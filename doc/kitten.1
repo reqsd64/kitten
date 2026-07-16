@@ -1,0 +1,188 @@
+.TH KITTEN 1 "July 2026" "kitten 0.1.0" "User Commands"
+.SH NAME
+kitten \- print source trees with metadata and inline text previews
+.SH SYNOPSIS
+.B kitten
+.RI [ OPTION ]...\&
+.RI [ PATH ]...\&
+.SH DESCRIPTION
+.B kitten
+prints a sorted tree for each requested path. Regular files include their size
+and, by default, a bounded text preview. Directories, symbolic links, and
+special files are identified explicitly.
+.PP
+With no path operand, the current directory is inspected. When exactly one
+operand names a real directory, kitten changes to that directory and prints it
+as
+.BR ./ .
+With multiple operands, each operand is printed as a separate root.
+.PP
+Symbolic links are never followed. Binary and oversized files are identified
+without printing their contents. Options may appear before or after operands;
+.B \-\-
+ends option parsing.
+.SH OPTIONS
+.SS Content preview
+.TP
+.BR \-m " " BYTES ", " \-\-max\-bytes= BYTES
+Set the maximum size of a file eligible for preview. The default is 256K.
+The suffix K, M, or G multiplies the value by 1024, 1048576, or 1073741824.
+The long option also accepts a separated value.
+.TP
+.B \-\-no\-content
+Print only the tree and file metadata.
+.TP
+.BR \-\-content= auto | never
+Select the preview mode. The value
+.B auto
+enables normal text previews;
+.B never
+disables them. A separated value is also accepted.
+.TP
+.B \-\-raw\-content
+Print file contents without escaping control bytes. Names and symbolic-link
+targets remain escaped. This option should be used only with trusted files.
+.SS Traversal and filtering
+.TP
+.BR \-L " " DEPTH ", " \-\-depth= DEPTH
+Descend at most DEPTH levels. Zero prints only the root, and one includes the
+root's immediate children. A negative value is invalid.
+.TP
+.BR \-\-exclude= PATTERN
+Skip names or paths matched by the shell-style PATTERN. Matching is performed
+against the entry name, its displayed relative path, and the same path without
+a leading
+.BR ./ .
+This option may be repeated and also accepts a separated value.
+.TP
+.B \-\-dirs\-only
+Print and descend into real directories only. Regular files, symbolic links,
+and special entries are skipped.
+.TP
+.BR \-U ", " \-\-unsorted
+Use filesystem order instead of sorting. This mode retains only one pending
+entry and keeps memory bounded for very large directories.
+.SS Output format
+.TP
+.BR \-H ", " \-\-human\-readable
+Print sizes in IEC binary units such as KiB and MiB. Exact byte counts are the
+default.
+.TP
+.B \-\-ascii
+Force portable ASCII tree branches. Without this option, Unicode is selected
+for a UTF-8 locale and ASCII is used otherwise.
+.TP
+.B \-\-unicode
+Force Unicode tree branches regardless of the locale. If both branch-style
+options are present, the last one wins.
+.TP
+.B \-\-summary
+Print directory, file, symbolic-link, special-file, byte, skipped, and error
+totals after traversal.
+.TP
+.BR \-\-language= auto | en | ru
+Select the message language. The default,
+.BR auto ,
+uses Russian for a Russian message locale and English otherwise. Option names
+and values remain English. A separated value is also accepted.
+.TP
+.B \-\-version
+Print the program version and license summary, then exit.
+.TP
+.BR \-h ", " \-\-help
+Print a detailed option summary and exit.
+.SH PATH OPERANDS
+A path consisting of a single hyphen is treated as a literal path. Any other
+path beginning with a hyphen must follow
+.BR \-\- .
+Entries inside directories are sorted according to the active locale unless
+.B \-\-unsorted
+is active.
+.PP
+Exclude patterns use
+.BR fnmatch (3)
+semantics. A slash in a pattern separates path components; wildcards do not
+cross that slash.
+.SH PREVIEWS
+Only regular files are previewed. After a non-blocking, no-follow open, the
+descriptor size is compared with the configured limit. A file with a NUL byte
+anywhere in that range is reported as binary. A file that grows beyond the
+limit while being inspected is reported as skipped.
+.PP
+The default preview mode preserves line boundaries and tabs. It escapes other
+ASCII control bytes, multibyte control characters, DEL, and invalid encoded
+bytes. With
+.BR \-\-raw\-content ,
+file data is printed without that escaping.
+Empty, unreadable, binary, oversized, and changing files receive explicit labels.
+.SH LOCALIZATION
+The program initializes the process locale and translates help, diagnostics,
+metadata labels, preview status messages, and summaries into English or
+Russian. Paths and file contents are not translated.
+.PP
+Use
+.B \-\-language
+when output must not depend on the environment. System error strings are
+provided by the platform C library and may follow a locale unsupported by
+kitten itself.
+.SH ENVIRONMENT
+.TP
+.B LC_ALL
+Overrides all locale categories when set.
+.TP
+.B LC_MESSAGES
+Selects the message locale when LC_ALL is unset.
+.TP
+.B LANG
+Supplies the fallback locale.
+.SH EXIT STATUS
+.TP
+.B 0
+All requested paths were inspected successfully, or help/version output was
+requested.
+.TP
+.B 1
+An argument was invalid, a requested operation failed, memory was exhausted,
+or an output stream reported an error.
+.PP
+Skipping binary or oversized previews is not an error.
+.SH PORTABILITY
+kitten requires C99 and POSIX.1-2008. It is intended for GNU/Linux and BSD
+systems. Native non-POSIX directory traversal, including the Windows API, is
+outside its supported scope.
+.SH SECURITY
+Names and symbolic-link targets are always escaped so embedded newlines and
+terminal control bytes cannot alter the tree display. File preview escaping is
+enabled by default. Raw content may contain terminal control sequences, so
+.B \-\-raw\-content
+should only be used for trusted input.
+.PP
+kitten does not follow symbolic links, but it is not a transactional snapshot.
+Opened files and directories must retain the device and inode reported by the
+preceding status check. Results may still reflect concurrent changes to file
+contents or ancestor path components during a traversal.
+.SH EXAMPLES
+.nf
+kitten
+kitten --no-content --summary src
+kitten -L 2 -m 64K --exclude=.git .
+kitten --language=ru --human-readable README.md
+kitten --unsorted --no-content /very/large/directory
+kitten -- --path-starting-with-a-dash
+.fi
+.SH FILES
+.TP
+.I /usr/local/bin/kitten
+Default installed executable location.
+.TP
+.I /usr/local/share/man/man1/kitten.1
+Default installed manual location.
+.SH LICENSE
+BSD 2-Clause License.
+.SH AUTHORS
+kitten contributors.
+.SH SEE ALSO
+.BR cat (1),
+.BR find (1),
+.BR tree (1),
+.BR fnmatch (3)
