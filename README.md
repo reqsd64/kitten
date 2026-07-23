@@ -4,6 +4,8 @@
 
 **A small C utility for readable snapshots of source trees.**
 
+[Documentation](docs/DOCS.md) 
+<br>
 [![C99](https://img.shields.io/badge/C-C99-555555?style=flat-square&logo=c&logoColor=white)](https://en.cppreference.com/w/c/99)
 [![POSIX.1-2008](https://img.shields.io/badge/API-POSIX.1--2008-6f665c?style=flat-square&logo=linux&logoColor=white)](https://pubs.opengroup.org/onlinepubs/9699919799/)
 [![Dependencies](https://img.shields.io/badge/runtime_dependencies-none-61966f?style=flat-square)](DOCS.md#requirements)
