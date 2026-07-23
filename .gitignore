@@ -1,7 +1,7 @@
 # Build output
 kitten
 doc/kitten.info
-
+demo/
 # Release staging
 kitten--*/
 
