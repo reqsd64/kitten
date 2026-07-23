@@ -105,6 +105,13 @@ enum preview_open {
 	PREVIEW_OPEN_CHANGED
 };
 
+enum preview_line {
+	PREVIEW_LINE_ERROR = -1,
+	PREVIEW_LINE_EOF,
+	PREVIEW_LINE_READY,
+	PREVIEW_LINE_TRUNCATED
+};
+
 static FILE *open_preview(const char *path, const struct stat *expected,
     off_t *size, enum preview_open *result)
 {
@@ -166,6 +173,8 @@ static enum preview_scan scan_preview(const struct kitten_context *context,
 
 	for (;;) {
 		nread = fread(buf, 1, sizeof(buf), fp);
+		if (ferror(fp))
+			return PREVIEW_READ_ERROR;
 		if (nread == 0)
 			break;
 		if (nread > context->options->preview_limit - total)
@@ -175,9 +184,53 @@ static enum preview_scan scan_preview(const struct kitten_context *context,
 		total += nread;
 	}
 
-	if (ferror(fp) || fseek(fp, 0, SEEK_SET) != 0)
+	if (fseek(fp, 0, SEEK_SET) != 0)
 		return PREVIEW_READ_ERROR;
 	return PREVIEW_TEXT;
+}
+
+static enum preview_line read_preview_line(FILE *fp, char **line,
+    size_t *capacity, size_t limit, size_t *length)
+{
+	size_t used = 0;
+	int byte;
+
+	while (used < limit) {
+		byte = getc(fp);
+		if (byte == EOF) {
+			if (ferror(fp))
+				return PREVIEW_LINE_ERROR;
+			*length = used;
+			return used ? PREVIEW_LINE_READY : PREVIEW_LINE_EOF;
+		}
+		if (used == *capacity) {
+			size_t next = *capacity ? *capacity * 2 : 256;
+			char *larger;
+
+			if (next < *capacity || next > limit)
+				next = limit;
+			larger = realloc(*line, next);
+			if (!larger)
+				return PREVIEW_LINE_ERROR;
+			*line = larger;
+			*capacity = next;
+		}
+		(*line)[used++] = (char)byte;
+		if (byte == '\n') {
+			*length = used;
+			return PREVIEW_LINE_READY;
+		}
+	}
+
+	byte = getc(fp);
+	if (byte == EOF) {
+		if (ferror(fp))
+			return PREVIEW_LINE_ERROR;
+		*length = used;
+		return used ? PREVIEW_LINE_READY : PREVIEW_LINE_EOF;
+	}
+	*length = used;
+	return PREVIEW_LINE_TRUNCATED;
 }
 
 static int print_file_preview(struct kitten_context *context, const char *path,
@@ -191,9 +244,10 @@ static int print_file_preview(struct kitten_context *context, const char *path,
 	char limit_size[64];
 	size_t cap = 0;
 	size_t bytes_read = 0;
-	ssize_t nread;
+	size_t line_bytes;
 	enum preview_scan scan;
 	enum preview_open opened;
+	enum preview_line line_status = PREVIEW_LINE_EOF;
 	off_t size;
 	int saw_content = 0;
 	int had_error = 0;
@@ -206,14 +260,16 @@ static int print_file_preview(struct kitten_context *context, const char *path,
 	    options->russian ? "содержимое" : "contents");
 	fp = open_preview(path, expected, &size, &opened);
 	if (!fp) {
+		int open_error = errno;
+
 		printf("%s%s ", prefix, bar);
 		if (opened == PREVIEW_OPEN_CHANGED) {
 			fputs(options->russian ? "[файл изменился во время открытия]" :
 			    "[file changed while opening]", stdout);
 		} else if (options->russian) {
-			printf("[не удалось открыть: %s]", strerror(errno));
+			printf("[не удалось открыть: %s]", strerror(open_error));
 		} else {
-			printf("[cannot open: %s]", strerror(errno));
+			printf("[cannot open: %s]", strerror(open_error));
 		}
 		putchar('\n');
 		printf("%s%s\n", prefix, end);
@@ -270,10 +326,9 @@ static int print_file_preview(struct kitten_context *context, const char *path,
 		return close_failed;
 	}
 
-	while ((nread = getline(&line, &cap, fp)) != -1) {
-		size_t line_bytes = (size_t)nread;
-
-		if (line_bytes > options->preview_limit - bytes_read) {
+	while ((line_status = read_preview_line(fp, &line, &cap,
+	    options->preview_limit - bytes_read, &line_bytes)) > PREVIEW_LINE_EOF) {
+		if (line_status == PREVIEW_LINE_TRUNCATED) {
 			printf("%s%s ", prefix, bar);
 			if (options->russian)
 				printf("[обрезано после %s]\n", limit_size);
@@ -284,22 +339,21 @@ static int print_file_preview(struct kitten_context *context, const char *path,
 			break;
 		}
 		bytes_read += line_bytes;
-		while (nread > 0 && (line[(size_t)nread - 1] == '\n' ||
-		    line[(size_t)nread - 1] == '\r')) {
-			--nread;
-			line[(size_t)nread] = '\0';
+		while (line_bytes > 0 && (line[line_bytes - 1] == '\n' ||
+		    line[line_bytes - 1] == '\r')) {
+			--line_bytes;
 		}
-		if (nread == 0) {
+		if (line_bytes == 0) {
 			printf("%s%s\n", prefix, bar);
 		} else {
 			printf("%s%s ", prefix, bar);
-			kitten_print_preview_text(context, stdout, line, (size_t)nread);
+			kitten_print_preview_text(context, stdout, line, line_bytes);
 			putchar('\n');
 		}
 		saw_content = 1;
 	}
 
-	if (ferror(fp)) {
+	if (line_status == PREVIEW_LINE_ERROR || ferror(fp)) {
 		print_tree_status(context, prefix, bar, "[read error]", "[ошибка чтения]");
 		had_error = 1;
 		++totals->errors;
@@ -597,7 +651,10 @@ static char *read_symlink_target(const char *path, off_t hint)
 	for (;;) {
 		length = readlink(path, target, capacity - 1);
 		if (length < 0) {
+			int saved_errno = errno;
+
 			free(target);
+			errno = saved_errno;
 			return NULL;
 		}
 		if ((size_t)length < capacity - 1) {
@@ -614,7 +671,10 @@ static char *read_symlink_target(const char *path, off_t hint)
 			char *larger = realloc(target, capacity);
 
 			if (!larger) {
+				int saved_errno = errno;
+
 				free(target);
+				errno = saved_errno;
 				return NULL;
 			}
 			target = larger;
@@ -636,14 +696,16 @@ static int print_entry(struct kitten_context *context, const char *path,
 	uintmax_t value;
 
 	if (lstat(path, &st) != 0) {
+		int stat_error = errno;
+
 		if (!is_root)
 			printf("%s%s ", prefix, branch);
 		kitten_print_escaped(stdout, name);
 		putchar(' ');
 		if (options->russian)
-			printf("[не найдено: %s]\n", strerror(errno));
+			printf("[не найдено: %s]\n", strerror(stat_error));
 		else
-			printf("[not found: %s]\n", strerror(errno));
+			printf("[not found: %s]\n", strerror(stat_error));
 		++totals->errors;
 		return 1;
 	}

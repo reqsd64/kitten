@@ -11,7 +11,7 @@
 
 <br>
 
-<img src="assets/preview.png" alt="kitten showing a compact source tree in a terminal" width="100%">
+<img src="assets/license-preview.png" alt="Terminal screenshot of kitten showing LICENSE file metadata and contents" width="100%">
 
 <br>
 
@@ -59,8 +59,8 @@ cc -std=c99 -Wall -Wextra -Wpedantic -O2 \
   src/main.c src/walk.c src/output.c -o kitten
 ```
 
-It uses POSIX interfaces including `readdir`, `fdopendir`, `getline`, `fnmatch`,
-`lstat`, `readlink` and non-blocking `open`.
+It uses POSIX interfaces including `readdir`, `fdopendir`, `fnmatch`, `lstat`,
+`readlink` and non-blocking `open`.
 
 ## Install
 
@@ -237,11 +237,11 @@ kitten prints those bytes as escapes so a crafted filename cannot add fake tree
 lines or send an escape sequence to the terminal. Backslashes in names are
 escaped as well.
 
-By default, text previews preserve tabs and valid locale-encoded characters,
-but escape ASCII controls, multibyte control characters and invalid encoded
-bytes. `--raw-content` is intended for trusted files: their contents can then
-write terminal control sequences. Filename and symlink-target escaping is
-never disabled.
+By default, text previews preserve tabs and most valid locale-encoded
+characters. ASCII controls, raw C1-range bytes (`0x80`–`0x9f`), multibyte
+control characters and invalid encoded bytes are escaped. `--raw-content` is
+intended for trusted files: their contents can then write terminal control
+sequences. Filename and symlink-target escaping is never disabled.
 
 ## Portability
 

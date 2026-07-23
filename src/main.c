@@ -59,7 +59,7 @@ static int set_depth_limit(struct kitten_options *options, const char *text)
 	char *end;
 	unsigned long value;
 
-	if (!text[0] || text[0] == '-')
+	if (!text[0] || text[0] < '0' || text[0] > '9')
 		return -1;
 	errno = 0;
 	value = strtoul(text, &end, 10);
@@ -76,7 +76,7 @@ static int set_preview_limit(struct kitten_options *options, const char *text)
 	unsigned long long scale = 1;
 	unsigned long long total;
 
-	if (!text[0] || text[0] == '-')
+	if (!text[0] || text[0] < '0' || text[0] > '9')
 		return -1;
 	errno = 0;
 	value = strtoull(text, &end, 10);
@@ -338,6 +338,7 @@ int main(int argc, char **argv)
 	int had_error = 0;
 	int show_summary = 0;
 	int changed;
+	int saved_errno;
 	int i;
 
 	memset(&options, 0, sizeof(options));
@@ -464,13 +465,14 @@ int main(int argc, char **argv)
 		had_error = kitten_walk_path(&context, ".", 1) != 0;
 	} else if (path_count == 1 && lstat(argv[1], &st) == 0 && S_ISDIR(st.st_mode)) {
 		if (enter_directory(argv[1], &st, &changed) != 0) {
+			saved_errno = errno;
 			fputs("kitten: ", stderr);
 			kitten_print_escaped(stderr, argv[1]);
 			if (changed)
 				fputs(options.russian ? ": каталог изменился во время открытия\n" :
 				    ": directory changed while opening\n", stderr);
 			else
-				fprintf(stderr, ": %s\n", strerror(errno));
+				fprintf(stderr, ": %s\n", strerror(saved_errno));
 			return finish_program(&options, 1);
 		}
 		had_error = kitten_walk_path(&context, ".", 1) != 0;

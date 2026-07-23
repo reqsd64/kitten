@@ -110,6 +110,9 @@ static void print_escaped_bytes(FILE *out, const char *text, size_t text_len,
 				fprintf(out, "\\x%02x", (unsigned int)byte);
 				++p;
 				memset(&state, 0, sizeof(state));
+			} else if (length == 1 && byte >= 0x80 && byte <= 0x9f) {
+				fprintf(out, "\\x%02x", (unsigned int)byte);
+				p += length;
 			} else if (iswcntrl((wint_t)wc)) {
 				if ((uintmax_t)wc <= 0xffff)
 					fprintf(out, "\\u%04" PRIxMAX, (uintmax_t)wc);
