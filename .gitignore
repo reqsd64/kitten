@@ -1,2 +1,22 @@
-*test/
-*kitten
+# Build output
+kitten
+doc/kitten.info
+
+# Release staging
+kitten--*/
+
+# Archives
+*.zip
+*.tar.gz
+*.tar.xz
+*.tgz
+
+# Checksums
+*.sha256
+
+# Temporary files
+*.o
+*.a
+RELEASE.md
+
+
