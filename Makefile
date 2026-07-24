@@ -24,6 +24,9 @@ all: kitten
 kitten: $(SOURCES) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -std=c99 -o $@ $(SOURCES) $(LDFLAGS) $(LDLIBS)
 
+test: kitten
+	sh test/cli.sh ./kitten
+
 info: doc/kitten.info
 
 doc/kitten.info: doc/kitten.texi
@@ -47,4 +50,4 @@ uninstall:
 clean:
 	$(RM) kitten doc/kitten.info
 
-.PHONY: all info install install-info uninstall clean
+.PHONY: all test info install install-info uninstall clean

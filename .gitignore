@@ -3,7 +3,7 @@ kitten
 doc/kitten.info
 demo/
 # Release staging
-kitten--*/
+kitten-*-linux-*/
 
 # Archives
 *.zip
@@ -18,5 +18,4 @@ kitten--*/
 *.o
 *.a
 RELEASE.md
-
 
