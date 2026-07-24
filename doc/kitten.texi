@@ -370,6 +370,12 @@ Build the executable with:
 make
 @end example
 
+Run the bundled CLI integration checks with:
+
+@example
+make test
+@end example
+
 The Makefile uses the standard @env{CC}, @env{CPPFLAGS}, @env{CFLAGS},
 @env{LDFLAGS}, and @env{LDLIBS} variables.  @env{WARNINGS} defaults to
 @option{-Wall -Wextra -Wpedantic}; C99 mode is always selected.

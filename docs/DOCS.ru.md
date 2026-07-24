@@ -51,6 +51,7 @@ make clean
 |:--|:--|
 | `all` | Собрать `kitten`; это цель по умолчанию. |
 | `kitten` | Скомпилировать три исходника C после изменения исходника или `kitten.h`. |
+| `test` | Собрать `kitten` и запустить интеграционные проверки CLI. |
 | `info` | Создать `doc/kitten.info` из `doc/kitten.texi`. |
 | `install` | Собрать и установить исполняемый файл и man-страницу. |
 | `install-info` | Собрать и установить руководство Info. |
@@ -823,25 +824,35 @@ make PREFIX=/usr DESTDIR="$pkgdir" install-info
 
 ```text
 .
+├── .github/
+│   ├── README.ru.md
+│   ├── SECURITY.md
+│   └── SECURITY.ru.md
 ├── assets/
+│   ├── assets-preview.jpg
 │   ├── license-preview.png
 │   └── preview.png
+├── demo/
+│   ├── config/
+│   └── src/
 ├── doc/
 │   ├── kitten.1
 │   └── kitten.texi
+├── docs/
+│   ├── DOCS.md
+│   └── DOCS.ru.md
 ├── src/
 │   ├── kitten.h
 │   ├── main.c
 │   ├── output.c
 │   └── walk.c
-├── DOCS.md
-├── DOCS.ru.md
+├── test/
+│   └── cli.sh
 ├── LICENSE
 ├── Makefile
+├── PKGBUILD
 ├── README.md
-├── README.ru.md
-├── SUPPORT.md
-└── SUPPORT.ru.md
+└── RELEASE.md
 ```
 
 При изменении видимого пользователю поведения синхронизируйте английскую и
@@ -850,4 +861,4 @@ make PREFIX=/usr DESTDIR="$pkgdir" install-info
 
 ## Лицензия
 
-`kitten` распространяется по [лицензии BSD 2-Clause](LICENSE).
+`kitten` распространяется по [лицензии BSD 2-Clause](../LICENSE).

@@ -50,10 +50,12 @@ Building requires a C99 compiler and `make`:
 
 ```sh
 make
+make test
 ./kitten
 ```
 
-With no path, `kitten` inspects the current directory.
+`make test` runs the bundled CLI integration checks. With no path, `kitten`
+inspects the current directory.
 
 ## Usage
 

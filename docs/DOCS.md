@@ -50,6 +50,7 @@ Make targets are:
 |:--|:--|
 | `all` | Build `kitten`; this is the default target. |
 | `kitten` | Compile the three C sources when a source or `kitten.h` changed. |
+| `test` | Build `kitten` and run the CLI integration checks. |
 | `info` | Build `doc/kitten.info` from `doc/kitten.texi`. |
 | `install` | Build and install the executable and man page. |
 | `install-info` | Build and install the Info manual. |
@@ -815,25 +816,35 @@ distribution or upstream collection.
 
 ```text
 .
+├── .github/
+│   ├── README.ru.md
+│   ├── SECURITY.md
+│   └── SECURITY.ru.md
 ├── assets/
+│   ├── assets-preview.jpg
 │   ├── license-preview.png
 │   └── preview.png
+├── demo/
+│   ├── config/
+│   └── src/
 ├── doc/
 │   ├── kitten.1
 │   └── kitten.texi
+├── docs/
+│   ├── DOCS.md
+│   └── DOCS.ru.md
 ├── src/
 │   ├── kitten.h
 │   ├── main.c
 │   ├── output.c
 │   └── walk.c
-├── DOCS.md
-├── DOCS.ru.md
+├── test/
+│   └── cli.sh
 ├── LICENSE
 ├── Makefile
+├── PKGBUILD
 ├── README.md
-├── README.ru.md
-├── SUPPORT.md
-└── SUPPORT.ru.md
+└── RELEASE.md
 ```
 
 When changing user-visible behavior, keep the English and Russian help text,
@@ -842,4 +853,4 @@ both Markdown manuals, the man page, and the Texinfo source aligned. Update
 
 ## License
 
-`kitten` is distributed under the [BSD 2-Clause License](LICENSE).
+`kitten` is distributed under the [BSD 2-Clause License](../LICENSE).
